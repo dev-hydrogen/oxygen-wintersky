@@ -470,11 +470,13 @@ export class EmitterInstance {
 					// new loop: the game makes a new emitter for each loop, as creators report (looping was never
 					// observable here: /particle and Script API play one loop, t31/t38). So everything starts over:
 					// v.* is cleared, the spawner's variables and pre-effect apply again, new randoms, the lifetime
-					// and rate setup, creation_expression and the creation events. Particles already out live on.
+					// and rate setup, creation_expression and the creation events. Particles already out live on
+					// with the old emitter (its variables, its cap), not in this loop's pool.
 					// Timeline events the old loop reached this frame fire first.
 					for (const t of this.def.emitter.events.timeline) {
 						if (t.at >= prevAge && t.at < period) for (const e of t.events) this.runEvent(e, -1);
 					}
+					this.world.retireLoop(this);
 					this.age -= period;
 					this.loopIndex++;
 					this.vars.length = 0;

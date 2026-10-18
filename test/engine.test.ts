@@ -256,7 +256,14 @@ describe('emitter lifetime', () => {
 		const emitter = world.spawn(def, { context: 'entity', variables: { 'v.given': 7 } });
 		steps(world, 130); // ~2.17 s → 3 loops
 		expect(emitter.loopIndex).toBe(2);
-		expect(emitter.pool.count).toBe(3); // earlier loops' particles still alive
+		// earlier loops' particles are still alive, each with the emitter of its loop (expired)
+		expect(emitter.pool.count).toBe(1);
+		expect(world.particleCount).toBe(3);
+		const earlier = world.emitters.filter((e) => e !== emitter);
+		expect(earlier.map((e) => [e.expired, e.pool.count, e.def])).toEqual([
+			[true, 1, def],
+			[true, 1, def],
+		]);
 		expect(emitter.age).toBeLessThan(1);
 		// v.* started over this loop (about 10 updates in), and the spawner's variables came back
 		expect(v(world, emitter.vars, 'variable.count')).toBeLessThan(15);
@@ -274,6 +281,32 @@ describe('emitter lifetime', () => {
 		coarse.spawn(d2, { context: 'entity' });
 		steps(coarse, 25, 0.1);
 		expect(coarse.temps.entries(coarse.symbols.tempNames).find(([k]) => k === 'temp.coarse')?.[1]).toBe(2);
+	});
+
+	it("a new loop counts and caps its own particles, and the last loop's keep their variables (index counters)", () => {
+		// a burst laid out by an index counter the emitter resets every update (the aurora example's pattern)
+		const json = effect({
+			'minecraft:emitter_initialization': { per_update_expression: 'v.next = 0;' },
+			'minecraft:emitter_rate_instant': { num_particles: 600 },
+			'minecraft:emitter_lifetime_looping': { active_time: 1 },
+			'minecraft:particle_lifetime_expression': { max_lifetime: 1.5 },
+			'minecraft:particle_initialization': { per_update_expression: 'v.index = v.next; v.next = v.next + 1;' },
+			'minecraft:particle_motion_parametric': { relative_position: ['v.index / 100', 0, 0] },
+		});
+		// /particle's cap of 1000, looping in place like the editor's Repeat
+		const { world, emitter } = setup(json, {}, { loop: true });
+		steps(world, 70); // into the second loop, with the first one's particles still out
+		const old = world.emitters.find((e) => e !== emitter)!;
+		expect(old.expired).toBe(true);
+		expect(old.pool.count).toBe(600);
+		// the new burst wasn't cut short by the old particles
+		expect(emitter.pool.count).toBe(600);
+		// each loop's particles are laid out by their own counter: 0 … 5.99 both times
+		const xs = (e: typeof emitter) => [...e.pool.pos.filter((_, k) => k % 3 === 0).subarray(0, e.pool.count)].map((x) => Math.round(x * 100));
+		expect(xs(emitter)).toEqual([...Array(600).keys()]);
+		expect(xs(old)).toEqual([...Array(600).keys()]);
+		steps(world, 40);
+		expect(world.emitters).toEqual([emitter]);
 	});
 
 	it('expiration events fire and particles survive emitter expiry', () => {
@@ -1023,6 +1056,52 @@ describe('facing', () => {
 		expect(sizes()).toEqual(drawn);
 		steps(world, 2);
 		expect(sizes()).toEqual(later);
+	});
+	describe('a frame prepared again', () => {
+		// a render-pass counter, a render-side random, a temp, and a variable carried from one frame's render to the next
+		const counted = effect({
+			'minecraft:emitter_initialization': { per_update_expression: 'v.n = 0;' },
+			'minecraft:emitter_rate_instant': { num_particles: 4 },
+			'minecraft:emitter_lifetime_once': { active_time: 10 },
+			'minecraft:particle_lifetime_expression': { max_lifetime: 10 },
+			'minecraft:particle_initialization': { per_render_expression: 'v.r = v.n; v.n = v.n + 1; t.drawn = (t.drawn ?? 0) + 1; v.frames = (v.frames ?? 0) + 1;' },
+			'minecraft:particle_appearance_billboard': { size: ['0.1 + v.r * 0.1', 'math.random(0.1, 0.2)'], facing_camera_mode: 'rotate_xyz' },
+			'minecraft:particle_appearance_tinting': { color: [1, 1, 1, 'v.frames / 100'] },
+		});
+		const drawn = (world: ParticleWorld) => {
+			const p = world.emitters[0].pool;
+			return { size: [...p.size.subarray(0, p.count * 2)], color: [...p.color.subarray(0, p.count * 4)], temps: world.temps.entries(world.symbols.tempNames) };
+		};
+
+		it('steps on exactly as if it had been prepared once (temps, randoms and carried variables included)', () => {
+			const once = setup(counted).world;
+			const many = setup(counted).world;
+			for (let f = 0; f < 6; f++) {
+				once.step(DT);
+				many.step(DT);
+				for (let i = 0; i < 3; i++) many.prepareRender();
+			}
+			expect(drawn(many)).toEqual(drawn(once));
+		});
+
+		it('keeps its base when an emitter moves to another world (worker threads), prepared there or not', () => {
+			for (const preparedFirst of [false, true]) {
+				const a = setup(counted);
+				steps(a.world, 3);
+				const shown = drawn(a.world);
+				const b = new ParticleWorld({ seed: 42 });
+				const def = b.loadEffect(counted);
+				b.frame = a.world.frame;
+				// the receiving world may have drawn its own emitters this frame already
+				if (preparedFirst) b.prepareRender();
+				b.adopt(a.world.export(new Set([a.emitter.id])), () => def);
+				b.prepareRender();
+				b.prepareRender();
+				// widths come from the render counter (heights draw from the receiving world's own random sequence)
+				const widths = (size: number[]) => size.filter((_, k) => k % 2 === 0);
+				expect(widths(drawn(b).size)).toEqual(widths(shown.size));
+			}
+		});
 	});
 	it('runs event nodes the way the game does (t49–t53)', () => {
 		const world = new ParticleWorld({ seed: 3 });

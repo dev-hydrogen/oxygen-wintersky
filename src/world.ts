@@ -197,6 +197,12 @@ export class ParticleWorld {
 	 * redrawing, an edit re-rendering a paused frame) starts over from here, so those writes don't pile up.
 	 */
 	private renderBase: RenderBase = { frame: -1, rng: 0, tempsV: [], tempsG: [], tempsGen: 0, vars: new WeakMap() };
+	/**
+	 * Emitters adopted from another world (a worker thread) arrive already prepared for their frame, with the
+	 * variables they had before that preparation. If this world hasn't prepared the frame yet, its first preparation
+	 * starts them from those; an update in between moves on and drops them.
+	 */
+	private adoptedBase = new Map<EmitterInstance, Value[]>();
 
 	constructor(options: WorldOptions = {}) {
 		const cap = options.particleCap;
@@ -254,6 +260,24 @@ export class ParticleWorld {
 		return e;
 	}
 
+	/**
+	 * A looping emitter begins a new loop. The game makes a new emitter for each loop, so the particles already out
+	 * stay with the old one: they keep its variable map (index counters go on counting only them), they count toward
+	 * its particle cap, not the new loop's, and it lives on, expired, until they're gone. Here the emitter keeps its id
+	 * and starts the loop empty; its particles move to an expired copy right after it, updated later this frame.
+	 */
+	retireLoop(e: EmitterInstance): EmitterInstance | null {
+		if (!e.pool.count) return null;
+		const old = new EmitterInstance(this, e.def, this.nextEmitterId++, e.spawnOptions);
+		old.restore(e.snapshot());
+		old.parent = e.parent;
+		old.expired = true;
+		old.active = false;
+		e.pool.clear();
+		this.emitters.splice(this.emitters.indexOf(e) + 1, 0, old);
+		return old;
+	}
+
 	/** Advance the simulation by dt seconds: update pass, then render preparation. */
 	step(dt: number): HaltSignal | null {
 		try {
@@ -267,6 +291,7 @@ export class ParticleWorld {
 	}
 
 	update(dt: number): void {
+		this.adoptedBase.clear();
 		this.frame++;
 		this.time += dt;
 		this.traces.length = 0;
@@ -307,10 +332,13 @@ export class ParticleWorld {
 			// an emitter spawned since this frame's first preparation has nothing recorded yet
 			if (again && saved.frame === b.frame) copyInto(e.vars, saved.vars);
 			else {
+				const adopted = this.adoptedBase.get(e);
+				if (adopted) copyInto(e.vars, adopted);
 				saved.frame = b.frame;
 				copyInto(saved.vars, e.vars);
 			}
 		}
+		this.adoptedBase.clear();
 	}
 
 	clear(): void {
@@ -321,6 +349,7 @@ export class ParticleWorld {
 		this.time = 0;
 		this.frame = 0;
 		this.renderBase.frame = -1;
+		this.adoptedBase.clear();
 		this.rng = new Rng(this.options.seed);
 		this.temps.v.length = 0;
 		this.temps.g.length = 0;
@@ -418,6 +447,7 @@ export class ParticleWorld {
 					attached: !!o.attachment,
 				},
 				vars: this.snapshotVars(e.vars),
+				renderBase: this.preparedVars(e),
 				pool: s.pool,
 				scalars: s.scalars,
 				position: s.position,
@@ -445,12 +475,27 @@ export class ParticleWorld {
 			const pool = Object.assign(new ParticlePool(1), p.pool);
 			const e = new EmitterInstance(this, def, p.id, spawnOptions);
 			e.restore({ id: p.id, def, spawnOptions, parentId: p.parentId, vars, pool, scalars: p.scalars, position: p.position, rotation: p.rotation });
+			if (p.renderBase) {
+				const base: Value[] = [];
+				for (const [name, value] of Object.entries(p.renderBase)) base[this.symbols.variable(name)] = value;
+				const b = this.renderBase;
+				// this world has prepared the frame already: drawing it again starts this emitter from its base too
+				if (b.frame === this.frame) b.vars.set(e, { frame: b.frame, vars: base });
+				else this.adoptedBase.set(e, base);
+			}
 			this.emitters.push(e);
 			added.push(e);
 		}
 		const all = new Map(this.emitters.map((e) => [e.id, e]));
 		for (const e of added) e.parent = e.parentId !== null ? (all.get(e.parentId) ?? null) : null;
 		return added;
+	}
+
+	/** An emitter's variables from before this frame's render preparation, by name (null when it wasn't prepared) */
+	private preparedVars(e: EmitterInstance): Record<string, Value> | null {
+		const b = this.renderBase;
+		const saved = b.frame === this.frame ? b.vars.get(e) : undefined;
+		return saved && saved.frame === b.frame ? this.snapshotVars(saved.vars) : null;
 	}
 
 	// ---- snapshots (scrubbing & stepping)
@@ -561,6 +606,8 @@ export interface PortableEmitter {
 		attached: boolean;
 	};
 	vars: Record<string, Value>;
+	/** its variables before the current frame's render preparation, when that frame was prepared */
+	renderBase?: Record<string, Value> | null;
 	pool: ParticlePool;
 	scalars: Record<string, unknown>;
 	position: Vec3;
