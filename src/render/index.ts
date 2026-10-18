@@ -55,6 +55,11 @@ export interface VibrantSettings {
 	additive: number;
 	/** strength of MERS emissive */
 	emissive: number;
+	/**
+	 * Response to the MERS emissive channel: emissive light grows as channel^gamma. The game's grows faster than
+	 * linear at low values (an emissive of 8/255 already glows), so this is below 1. Default 1.
+	 */
+	emissiveGamma?: number;
 	/** emissive desaturation from lighting/global.json */
 	desaturation: number;
 }
@@ -159,6 +164,7 @@ class Batch {
 				uVVHaze: { value: new THREE.Vector3(0, 0, 0) },
 				uVVAdditive: { value: 1 },
 				uVVEmissive: { value: 4 },
+				uVVEmissiveGamma: { value: 1 },
 				uVVDesat: { value: 0.1 },
 				uMers: { value: missingTexture },
 				uHasMers: { value: 0 },
@@ -262,6 +268,7 @@ class Batch {
 			(u.uVVHaze.value as THREE.Vector3).set(...vv.haze);
 			u.uVVAdditive.value = vv.additive;
 			u.uVVEmissive.value = vv.emissive;
+			u.uVVEmissiveGamma.value = vv.emissiveGamma ?? 1;
 			u.uVVDesat.value = vv.desaturation;
 		}
 		u.uHasMers.value = vv && mers ? 1 : 0;

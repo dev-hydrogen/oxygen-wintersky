@@ -143,6 +143,7 @@ uniform vec3 uVVLight;            // light on every particle, lit or not (measur
 uniform vec3 uVVHaze;             // in-scattering added in front of non-additive particles
 uniform float uVVAdditive;        // additive particles are lit brighter
 uniform float uVVEmissive;        // MERS emissive strength
+uniform float uVVEmissiveGamma;   // emissive light grows as channel^gamma
 uniform float uVVDesat;           // emissive desaturation (lighting/global.json)
 uniform sampler2D uMers;
 uniform float uHasMers;
@@ -167,7 +168,7 @@ void main() {
 		vec3 base = pow(max(c.rgb, vec3(0.0)), vec3(2.2));
 		vec3 col = uMaterial == 3 ? base * uVVLight * uVVAdditive : base * uVVLight + uVVHaze;
 		if (uHasMers > 0.5) {
-			float e = texture2D(uMers, vUv).g;
+			float e = pow(texture2D(uMers, vUv).g, uVVEmissiveGamma);
 			vec3 eb = mix(base, vec3(dot(base, vec3(0.2126, 0.7152, 0.0722))), uVVDesat);
 			col += eb * e * uVVEmissive;
 		}
