@@ -191,6 +191,12 @@ export class ParticleWorld {
 	/** field currently evaluating (error attribution) */
 	current: { path: string; emitter: number; particle: number; phase: Phase } = { path: '', emitter: 0, particle: -1, phase: 'creation' };
 	private traceCache = new Map<CompiledExpression, CompiledExpression>();
+	/**
+	 * Variables, temps and the random state as the last update left them, before render preparation wrote to
+	 * them (render-pass counters, temps, math.random). Preparing the same frame again (a paused preview
+	 * redrawing, an edit re-rendering a paused frame) starts over from here, so those writes don't pile up.
+	 */
+	private renderBase: RenderBase = { frame: -1, rng: 0, tempsV: [], tempsG: [], tempsGen: 0, vars: new WeakMap() };
 
 	constructor(options: WorldOptions = {}) {
 		const cap = options.particleCap;
@@ -272,9 +278,38 @@ export class ParticleWorld {
 	}
 
 	prepareRender(): void {
+		this.restoreRenderBase();
 		for (const e of this.emitters) {
 			e.culled = this.cullEmitters && e.isCulled(this.camera);
 			if (!e.culled) e.prepareRender();
+		}
+	}
+
+	/** The first render preparation of a frame records the update's result; later ones in that frame restore it */
+	private restoreRenderBase(): void {
+		const b = this.renderBase;
+		const again = b.frame === this.frame;
+		if (again) {
+			this.rng.state = b.rng;
+			copyInto(this.temps.v, b.tempsV);
+			copyInto(this.temps.g, b.tempsG);
+			this.temps.gen = b.tempsGen;
+		} else {
+			b.frame = this.frame;
+			b.rng = this.rng.state;
+			copyInto(b.tempsV, this.temps.v);
+			copyInto(b.tempsG, this.temps.g);
+			b.tempsGen = this.temps.gen;
+		}
+		for (const e of this.emitters) {
+			let saved = b.vars.get(e);
+			if (!saved) b.vars.set(e, (saved = { frame: -1, vars: [] }));
+			// an emitter spawned since this frame's first preparation has nothing recorded yet
+			if (again && saved.frame === b.frame) copyInto(e.vars, saved.vars);
+			else {
+				saved.frame = b.frame;
+				copyInto(saved.vars, e.vars);
+			}
 		}
 	}
 
@@ -285,6 +320,7 @@ export class ParticleWorld {
 		this.log.length = 0;
 		this.time = 0;
 		this.frame = 0;
+		this.renderBase.frame = -1;
 		this.rng = new Rng(this.options.seed);
 		this.temps.v.length = 0;
 		this.temps.g.length = 0;
@@ -420,6 +456,8 @@ export class ParticleWorld {
 	// ---- snapshots (scrubbing & stepping)
 
 	snapshot(): WorldSnapshot {
+		const b = this.renderBase;
+		const prepared = b.frame === this.frame;
 		return {
 			time: this.time,
 			frame: this.frame,
@@ -427,7 +465,13 @@ export class ParticleWorld {
 			nextParticleId: this.nextParticleId,
 			nextEmitterId: this.nextEmitterId,
 			temps: { v: this.temps.v.slice(), g: this.temps.g.slice(), gen: this.temps.gen },
-			emitters: this.emitters.map((e) => e.snapshot()),
+			emitters: this.emitters.map((e) => {
+				const s = e.snapshot();
+				const saved = prepared ? b.vars.get(e) : undefined;
+				if (saved && saved.frame === b.frame) s.renderBase = saved.vars.slice();
+				return s;
+			}),
+			renderBase: prepared ? { rng: b.rng, temps: { v: b.tempsV.slice(), g: b.tempsG.slice(), gen: b.tempsGen } } : null,
 		};
 	}
 
@@ -440,16 +484,45 @@ export class ParticleWorld {
 		this.temps.v = s.temps.v.slice();
 		this.temps.g = s.temps.g.slice();
 		this.temps.gen = s.temps.gen;
+		const b = this.renderBase;
+		const rb = s.renderBase;
+		// drawing the restored frame again prepares it from where its own render preparation started
+		b.frame = rb ? s.frame : -1;
+		if (rb) {
+			b.rng = rb.rng;
+			copyInto(b.tempsV, rb.temps.v);
+			copyInto(b.tempsG, rb.temps.g);
+			b.tempsGen = rb.temps.gen;
+		}
 		const byId = new Map(this.emitters.map((e) => [e.id, e]));
 		this.emitters = s.emitters.map((es) => {
 			const e = byId.get(es.id) ?? new EmitterInstance(this, es.def, es.id, es.spawnOptions);
 			e.restore(es);
+			const saved = b.vars.get(e);
+			if (rb && es.renderBase) b.vars.set(e, { frame: s.frame, vars: es.renderBase.slice() });
+			else if (saved) saved.frame = -1;
 			return e;
 		});
 		// re-link parents
 		const all = new Map(this.emitters.map((e) => [e.id, e]));
 		for (const e of this.emitters) e.parent = e.parentId !== null ? all.get(e.parentId) ?? null : null;
 	}
+}
+
+interface RenderBase {
+	/** the frame recorded, -1 for none */
+	frame: number;
+	rng: number;
+	tempsV: Value[];
+	tempsG: number[];
+	tempsGen: number;
+	vars: WeakMap<EmitterInstance, { frame: number; vars: Value[] }>;
+}
+
+/** Overwrite `to` with `from`'s elements, reusing `to`'s storage */
+function copyInto<T>(to: T[], from: readonly T[]): void {
+	to.length = from.length;
+	for (let i = 0; i < from.length; i++) to[i] = from[i];
 }
 
 export interface EmitterSnapshot {
@@ -462,6 +535,8 @@ export interface EmitterSnapshot {
 	scalars: Record<string, unknown>;
 	position: Vec3;
 	rotation: Quat;
+	/** its variables before the snapshot frame's render preparation, when that frame was prepared */
+	renderBase?: Value[];
 }
 
 /**
@@ -501,4 +576,6 @@ export interface WorldSnapshot {
 	/** temps are global and persistent in-game (t05/t30), so they're part of the state */
 	temps: { v: Value[]; g: number[]; gen: number };
 	emitters: EmitterSnapshot[];
+	/** the random state and temps before the snapshot frame's render preparation (null when it wasn't prepared) */
+	renderBase?: { rng: number; temps: { v: Value[]; g: number[]; gen: number } } | null;
 }

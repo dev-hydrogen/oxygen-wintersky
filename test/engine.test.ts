@@ -995,6 +995,35 @@ describe('facing', () => {
 		steps(world, 10);
 		expect(emitter.def).toBe(edited);
 	});
+	it('prepares a paused frame the same way however often it is drawn, also after a restore', () => {
+		// a render-pass counter (the examples' layout pattern) and a render variable that carries over frames
+		const { world, emitter } = setup(
+			effect({
+				'minecraft:emitter_initialization': { per_update_expression: 'v.n = 0;' },
+				'minecraft:emitter_rate_instant': { num_particles: 5 },
+				'minecraft:emitter_lifetime_once': { active_time: 10 },
+				'minecraft:particle_lifetime_expression': { max_lifetime: 10 },
+				'minecraft:particle_initialization': { per_render_expression: 'v.r = v.n; v.n = v.n + 1; v.frames = (v.frames ?? 0) + 1;' },
+				'minecraft:particle_appearance_billboard': { size: ['0.01 + v.r * 0.01', 'v.frames'], facing_camera_mode: 'rotate_xyz' },
+			}),
+		);
+		const sizes = () => [...emitter.pool.size.subarray(0, emitter.pool.count * 2)];
+		steps(world, 3);
+		const drawn = sizes();
+		expect(drawn.filter((_, k) => k % 2 === 0).map((w) => +w.toFixed(3))).toEqual([0.01, 0.02, 0.03, 0.04, 0.05]);
+		for (let i = 0; i < 4; i++) world.prepareRender();
+		expect(sizes()).toEqual(drawn);
+
+		// scrubbing back and drawing shows that frame as it was; stepping on from it replays exactly
+		const snap = world.snapshot();
+		steps(world, 2);
+		const later = sizes();
+		world.restore(snap);
+		world.prepareRender();
+		expect(sizes()).toEqual(drawn);
+		steps(world, 2);
+		expect(sizes()).toEqual(later);
+	});
 	it('runs event nodes the way the game does (t49–t53)', () => {
 		const world = new ParticleWorld({ seed: 3 });
 		const child = world.loadEffect(
