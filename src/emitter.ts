@@ -20,6 +20,8 @@ export interface ParticleFacing extends FacingBasis {
 	rotatedUp: Vec3;
 }
 
+const ORIGIN: Vec3 = [0, 0, 0];
+
 /** Live transform source for emitters attached to an entity / locator / parent emitter */
 export interface Attachment {
 	getTransform(): { position: Vec3; rotation: Quat; velocity: Vec3 };
@@ -28,10 +30,15 @@ export interface Attachment {
 	/** false once the entity is gone (the emitter then expires) */
 	alive?(): boolean;
 	/**
-	 * The locator's frame has its Y axis flipped (seen in-game on some rigs' locators): particles spawn with their
-	 * emitter-space position, direction and velocity mirrored in Y. Not measured; a preview option.
+	 * Scale of the attachment's frame (a scaled bone or entity, e05/e10): an emitter's spawn offsets are scaled by
+	 * it, its directions and speeds aren't (e04).
 	 */
-	mirrorY?: boolean;
+	scale?: number;
+	/**
+	 * It's an entity (not a parent emitter). World-space parametric positions of its emitters are then taken from
+	 * the world origin (e10), and its emitters' local-space particles go when it does (e12).
+	 */
+	entity?: boolean;
 }
 
 export interface SpawnOptions {
@@ -430,6 +437,18 @@ export class EmitterInstance {
 		}
 	}
 
+	/** Remove the particles that live in the emitter's space, without their expiration events */
+	private dropLocalParticles(): void {
+		const p = this.pool;
+		let any = false;
+		for (let i = 0; i < p.count; i++)
+			if (p.local[i]) {
+				p.dead[i] = 1;
+				any = true;
+			}
+		if (any) p.compact();
+	}
+
 	expire(fireEvents = true): void {
 		if (this.expired) return;
 		this.expired = true;
@@ -452,7 +471,12 @@ export class EmitterInstance {
 		if (this.failed) return;
 		const def = this.def;
 		const life = def.emitter.lifetime;
-		if (this.spawnOptions.attachment?.alive && !this.spawnOptions.attachment.alive()) this.expire();
+		const att = this.spawnOptions.attachment;
+		if (att?.alive && !att.alive() && !this.expired) {
+			this.expire();
+			// the entity is gone: particles that lived in its space go with it, world-space ones stay (e12)
+			if (att.entity) this.dropLocalParticles();
+		}
 		this.refreshTransform();
 
 		const prevAge = this.age;
@@ -640,10 +664,12 @@ export class EmitterInstance {
 			vel[2] = dir[2] * s;
 		}
 
-		// attachment transform (a locator that flips Y mirrors the emitter frame first)
-		if (this.spawnOptions.attachment?.mirrorY) {
-			pos[1] = -pos[1];
-			vel[1] = -vel[1];
+		// attachment transform: a scaled frame scales where particles spawn, not how fast they go (e04, e05)
+		const scale = this.spawnOptions.attachment?.scale;
+		if (scale !== undefined && scale !== 1) {
+			pos[0] *= scale;
+			pos[1] *= scale;
+			pos[2] *= scale;
 		}
 		const local = this.localSpace;
 		const rotateIntoSpace = !(local && def.emitter.localSpace.rotation);
@@ -837,9 +863,11 @@ export class EmitterInstance {
 						p.pos[i3 + 1] = rel[1];
 						p.pos[i3 + 2] = rel[2];
 					} else {
-						p.pos[i3] = this.position[0] + rel[0];
-						p.pos[i3 + 1] = this.position[1] + rel[1];
-						p.pos[i3 + 2] = this.position[2] + rel[2];
+						// world-space emitters on an entity measure it from the world origin (e10)
+						const o = this.spawnOptions.attachment?.entity ? ORIGIN : this.position;
+						p.pos[i3] = o[0] + rel[0];
+						p.pos[i3 + 1] = o[1] + rel[1];
+						p.pos[i3 + 2] = o[2] + rel[2];
 					}
 				}
 				if (par.direction) {

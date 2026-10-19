@@ -27,10 +27,10 @@ const heavy = {
 
 describe('performance', () => {
 	it('10k Molang-heavy particles fit the 165 Hz frame budget', () => {
-		const world = new ParticleWorld({ seed: 9 });
+		const world = new ParticleWorld({ seed: 9, particleCap: 10000 }); // above the game's 1000, to measure throughput
 		const def = world.loadEffect(heavy);
 		world.cullEmitters = false;
-		world.spawn(def, { position: [0, 0, 0], context: 'entity' }); // entity emitters allow 10k
+		world.spawn(def, { position: [0, 0, 0], context: 'entity' });
 		for (let i = 0; i < 30; i++) world.step(1 / 165); // warm up (JIT)
 		const frames = 120;
 		const t0 = performance.now();
@@ -42,7 +42,7 @@ describe('performance', () => {
 	});
 
 	it('50k Molang-heavy particles across five emitters', () => {
-		const world = new ParticleWorld({ seed: 11 });
+		const world = new ParticleWorld({ seed: 11, particleCap: 10000 });
 		const def = world.loadEffect(heavy);
 		world.cullEmitters = false;
 		for (let k = 0; k < 5; k++) world.spawn(def, { position: [k * 10, 0, 0], context: 'entity' });

@@ -60,8 +60,8 @@ export interface WorldOptions {
 	f32?: boolean;
 	/**
 	 * Bedrock's undocumented live-particle cap per emitter, by spawn context. Measured in 1.26.52:
-	 * 1000 for /particle and Script API emitters (t42/t43). Entity emitters: 10000 (reported, unverified).
-	 * Event children use their root emitter's context.
+	 * 1000 for /particle and Script API emitters (t42/t43), and for emitters on an entity too, bursts and
+	 * steady rates alike (e09/e12; creators had reported 10,000). Event children use their root emitter's context.
 	 */
 	particleCap?: number | Partial<Record<SpawnContext, number>>;
 	/** Spawn contexts whose looping emitters restart. /particle and Script API emitters play one loop (t31/t38). */
@@ -75,7 +75,7 @@ export interface WorldOptions {
 	queryExists?: ((name: string) => boolean) | null;
 }
 
-export const DEFAULT_PARTICLE_CAPS: Record<SpawnContext, number> = { command: 1000, script: 1000, entity: 10000, event: 1000 };
+export const DEFAULT_PARTICLE_CAPS: Record<SpawnContext, number> = { command: 1000, script: 1000, entity: 1000, event: 1000 };
 
 export interface ContentError {
 	code: MolangErrorCode | 'cap' | 'missing-effect' | 'missing-event';
@@ -143,6 +143,8 @@ interface Slots {
 export class ParticleWorld {
 	readonly symbols = new SymbolTable();
 	readonly temps = new TempScope();
+	/** context.* values by symbol slot. Molang can't write them: the host supplies them (a scenario's c.x) */
+	readonly contexts: Value[] = [];
 	readonly options: {
 		f32: boolean;
 		particleCap: Record<SpawnContext, number>;
@@ -353,6 +355,7 @@ export class ParticleWorld {
 		this.rng = new Rng(this.options.seed);
 		this.temps.v.length = 0;
 		this.temps.g.length = 0;
+		this.contexts.length = 0;
 		this.nextParticleId = 1;
 		this.nextEmitterId = 1;
 	}
@@ -370,7 +373,7 @@ export class ParticleWorld {
 		return createEnv({
 			v: vars,
 			t: this.temps,
-			c: null,
+			c: this.contexts,
 			rnd: this.rng.next,
 			unsetMode: this.options.unsetMode,
 			err: (code, node) => world.reportError(code, node),
@@ -510,6 +513,7 @@ export class ParticleWorld {
 			nextParticleId: this.nextParticleId,
 			nextEmitterId: this.nextEmitterId,
 			temps: { v: this.temps.v.slice(), g: this.temps.g.slice(), gen: this.temps.gen },
+			contexts: this.contexts.slice(),
 			emitters: this.emitters.map((e) => {
 				const s = e.snapshot();
 				const saved = prepared ? b.vars.get(e) : undefined;
@@ -529,6 +533,9 @@ export class ParticleWorld {
 		this.temps.v = s.temps.v.slice();
 		this.temps.g = s.temps.g.slice();
 		this.temps.gen = s.temps.gen;
+		// the emitters' environments hold this array, so it's refilled rather than replaced
+		this.contexts.length = 0;
+		this.contexts.push(...(s.contexts ?? []));
 		const b = this.renderBase;
 		const rb = s.renderBase;
 		// drawing the restored frame again prepares it from where its own render preparation started
@@ -622,6 +629,8 @@ export interface WorldSnapshot {
 	nextEmitterId: number;
 	/** temps are global and persistent in-game (t05/t30), so they're part of the state */
 	temps: { v: Value[]; g: number[]; gen: number };
+	/** context.* values the host supplied */
+	contexts?: Value[];
 	emitters: EmitterSnapshot[];
 	/** the random state and temps before the snapshot frame's render preparation (null when it wasn't prepared) */
 	renderBase?: { rng: number; temps: { v: Value[]; g: number[]; gen: number } } | null;

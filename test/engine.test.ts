@@ -154,6 +154,26 @@ describe('evaluation order', () => {
 		expect(emitter.pool.size[1]).toBe(0.5);
 	});
 
+	it('context.* reads what the host supplied, and is unset (0) without it', () => {
+		const { world, emitter } = setup(
+			effect({
+				'minecraft:emitter_rate_instant': { num_particles: 1 },
+				'minecraft:emitter_lifetime_once': { active_time: 5 },
+				'minecraft:emitter_initialization': { per_update_expression: 'v.a = c.size; v.b = context.missing + 1;' },
+				'minecraft:particle_lifetime_expression': { max_lifetime: 10 },
+			}),
+		);
+		world.contexts[world.symbols.context('context.size')] = 3;
+		world.step(DT);
+		expect(v(world, emitter.vars, 'variable.a')).toBe(3);
+		// an unset read aborts the expression, as for variables (t01)
+		expect(v(world, emitter.vars, 'variable.b')).toBeUndefined();
+		const snap = world.snapshot();
+		world.contexts.length = 0;
+		world.restore(snap);
+		expect(world.contexts[world.symbols.context('context.size')]).toBe(3);
+	});
+
 	it('expiration_expression is tested after motion and age advance', () => {
 		const { world, emitter } = setup(
 			effect({
@@ -343,7 +363,7 @@ describe('particles', () => {
 		expect(world.particleCount).toBe(0);
 	});
 
-	it('caps live particles per emitter by spawn context (1000 for /particle, t42/t43)', () => {
+	it('caps live particles at 1000 per emitter, on an entity too (t42/t43, e09)', () => {
 		const json = effect({
 			'minecraft:emitter_rate_instant': { num_particles: 25000 },
 			'minecraft:emitter_lifetime_once': { active_time: 1 },
@@ -357,7 +377,10 @@ describe('particles', () => {
 		expect([...world.errors.values()].some((e) => e.code === 'cap')).toBe(true);
 		const entity = setup(json, {}, { context: 'entity' });
 		entity.world.step(DT);
-		expect(entity.emitter.pool.count).toBe(10000);
+		expect(entity.emitter.pool.count).toBe(1000);
+		const raised = setup(json, { particleCap: { entity: 5000 } }, { context: 'entity' });
+		raised.world.step(DT);
+		expect(raised.emitter.pool.count).toBe(5000);
 	});
 
 	it('spheres and discs spawn denser toward the centre: the distance is the mean of two randoms', () => {
@@ -944,7 +967,7 @@ describe('facing', () => {
 		expect(count({ timeline: { '0.4': 'go' } }, 'command')).toBe(0);
 		expect(count({ expiration_event: 'go' }, 'command')).toBe(0);
 	});
-	it('mirrors spawns in Y on a locator that flips its Y axis', () => {
+	it('scales spawn offsets, not speeds, by the attachment frame (e04, e05)', () => {
 		const json = effect({
 			'minecraft:emitter_rate_instant': { num_particles: 1 },
 			'minecraft:emitter_lifetime_once': { active_time: 1 },
@@ -952,18 +975,49 @@ describe('facing', () => {
 			'minecraft:particle_initial_speed': 2,
 			'minecraft:particle_lifetime_expression': { max_lifetime: 5 },
 		});
-		const at = (mirrorY: boolean) => {
-			const { world, emitter } = setup(json, {}, { context: 'entity', attachment: { getTransform: () => ({ position: [0, 2, 0], rotation: [0, 0, 0, 1], velocity: [0, 0, 0] }), mirrorY } });
-			steps(world, 1);
+		const at = (scale: number) => {
+			const { world, emitter } = setup(json, {}, { context: 'entity', attachment: { getTransform: () => ({ position: [0, 2, 0], rotation: [0, 0, 0, 1], velocity: [0, 0, 0] }), scale, entity: true } });
+			emitter.update(0);
 			return { y: emitter.pool.pos[1], vy: emitter.pool.vel[1] };
 		};
-		// the offset and the direction point up from the locator, or down when it flips Y
-		const up = at(false);
-		const down = at(true);
-		expect(up.y).toBeGreaterThan(2.4);
-		expect(up.vy).toBeGreaterThan(1.9);
-		expect(down.y).toBeLessThan(1.6);
-		expect(down.vy).toBeLessThan(-1.9);
+		expect(at(1).y).toBeCloseTo(2.5);
+		expect(at(2).y).toBeCloseTo(3);
+		expect(at(2).vy).toBeCloseTo(2);
+	});
+	it('takes world-space parametric positions on an entity from the world origin (e10)', () => {
+		const json = effect({
+			'minecraft:emitter_rate_instant': { num_particles: 1 },
+			'minecraft:emitter_lifetime_once': { active_time: 1 },
+			'minecraft:particle_motion_parametric': { relative_position: [1, 0, 2] },
+			'minecraft:particle_lifetime_expression': { max_lifetime: 5 },
+		});
+		const transform = () => ({ position: [10, 5, 10] as [number, number, number], rotation: [0, 0, 0, 1] as [number, number, number, number], velocity: [0, 0, 0] as [number, number, number] });
+		const onEntity = setup(json, {}, { context: 'entity', attachment: { getTransform: transform, entity: true } });
+		steps(onEntity.world, 2);
+		expect([...onEntity.emitter.pool.pos.slice(0, 3)]).toEqual([1, 0, 2]);
+		// /particle: from the emitter
+		const standalone = setup(json, {}, { position: [10, 5, 10] });
+		steps(standalone.world, 2);
+		expect([...standalone.emitter.pool.pos.slice(0, 3)]).toEqual([11, 5, 12]);
+	});
+	it('drops local-space particles when the entity goes; world-space ones stay (e12)', () => {
+		const make = (local: boolean) =>
+			effect({
+				...(local ? { 'minecraft:emitter_local_space': { position: true, rotation: true } } : {}),
+				'minecraft:emitter_rate_instant': { num_particles: 3 },
+				'minecraft:emitter_lifetime_once': { active_time: 1 },
+				'minecraft:particle_lifetime_expression': { max_lifetime: 5 },
+			});
+		const run = (local: boolean) => {
+			let alive = true;
+			const { world, emitter } = setup(make(local), {}, { context: 'entity', attachment: { getTransform: () => ({ position: [0, 0, 0], rotation: [0, 0, 0, 1], velocity: [0, 0, 0] }), alive: () => alive, entity: true } });
+			steps(world, 2);
+			alive = false;
+			steps(world, 2);
+			return { expired: emitter.expired, count: emitter.pool.count };
+		};
+		expect(run(true)).toEqual({ expired: true, count: 0 });
+		expect(run(false)).toEqual({ expired: true, count: 3 });
 	});
 	it('counts below a ground plane as inside its block for the in-blocks components', () => {
 		const json = effect({
