@@ -476,9 +476,11 @@ export function readEffect(json: unknown, options: DefinitionOptions): EffectDef
 	// emitter
 	const init = C('emitter_initialization');
 	const ls = C('emitter_local_space');
-	const localSpace = { position: !!ls?.position, rotation: !!ls?.rotation, velocity: !!ls?.velocity };
+	let localSpace = { position: !!ls?.position, rotation: !!ls?.rotation, velocity: !!ls?.velocity };
 	if (localSpace.rotation && !localSpace.position) {
-		r.diag(P('emitter_local_space', 'rotation'), 'error', 'local-space', 'rotation: true requires position: true');
+		// the game rejects the component and the effect runs in world space (e13)
+		r.diag(P('emitter_local_space', 'rotation'), 'error', 'local-space', 'We do not support rotation being true and position being false. The game ignores this component, so the effect runs in world space');
+		localSpace = { position: false, rotation: false, velocity: false };
 	}
 
 	let rate: EffectDefinition['emitter']['rate'] = null;

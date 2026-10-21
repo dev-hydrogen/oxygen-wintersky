@@ -1209,10 +1209,51 @@ describe('facing', () => {
 		world.resolveEffect = () => child;
 		world.spawn(single, { position: [7, 0, 7] });
 		expect(world.emitters.find((x) => x.def === child)!.position).toEqual([0, 0, 0]);
-		// only measured for /particle and scripts: under an entity the spawn stays where it fired
+		// on an entity too: they exist there (e17) but appear nowhere near it (e18)
 		world.clear();
-		world.spawn(single, { position: [7, 0, 7], context: 'entity' });
-		expect(world.emitters.find((x) => x.def === child)!.position).toEqual([7, 0, 7]);
+		world.spawn(single, { position: [7, 0, 7], context: 'entity', attachment: { getTransform: () => ({ position: [7, 0, 7], rotation: [0, 0, 0, 1], velocity: [0, 0, 0] }), entity: true } });
+		expect(world.emitters.find((x) => x.def === child)!.position).toEqual([0, 0, 0]);
+	});
+	it('places event children of an effect on an entity as measured (e13, e14, e17, e18)', () => {
+		const at: [number, number, number] = [10, 0, 10];
+		const onEntity = { getTransform: () => ({ position: [...at] as [number, number, number], rotation: [0, 0, 0, 1] as [number, number, number, number], velocity: [0, 0, 0] as [number, number, number] }), entity: true };
+		/** where each kind of child lands: the parent's one particle sits 1 block along x from its emitter */
+		const kids = (phase: 'creation' | 'timeline', local: boolean, bound = true) => {
+			const world = new ParticleWorld({ seed: 1 });
+			const kid = world.loadEffect(effect({ 'minecraft:emitter_rate_instant': { num_particles: 1 }, 'minecraft:emitter_lifetime_once': { active_time: 1 }, 'minecraft:particle_lifetime_expression': { max_lifetime: 5 } }));
+			const parent = world.loadEffect(
+				effect(
+					{
+						...(local ? { 'minecraft:emitter_local_space': { position: true, rotation: true } } : {}),
+						'minecraft:emitter_rate_instant': { num_particles: 1 },
+						'minecraft:emitter_lifetime_once': { active_time: 3 },
+						'minecraft:emitter_shape_point': { offset: [1, 0, 0] },
+						'minecraft:particle_lifetime_expression': { max_lifetime: 2 },
+						'minecraft:particle_lifetime_events': phase === 'creation' ? { creation_event: 'kids' } : { timeline: { '0.5': 'kids' } },
+					},
+					{ events: { kids: { sequence: ['emitter', 'emitter_bound', 'particle'].map((type) => ({ particle_effect: { effect: 'test:fx', type } })) } } },
+				),
+			);
+			world.resolveEffect = () => kid;
+			world.spawn(parent, { position: [...at], context: 'entity', attachment: bound ? onEntity : null });
+			steps(world, phase === 'creation' ? 1 : 35);
+			const of = (o: (k: (typeof world.emitters)[number]) => boolean) => [...world.emitters.find((k) => k.def === kid && o(k))!.position];
+			return { emitter: of((k) => !k.spawnOptions.bound && !k.spawnOptions.singleParticle), bound: of((k) => !!k.spawnOptions.bound), particle: of((k) => !!k.spawnOptions.singleParticle) };
+		};
+		// world space: at the particle; emitter_bound at the emitter; single particles away from the entity
+		expect(kids('timeline', false)).toEqual({ emitter: [11, 0, 10], bound: [10, 0, 10], particle: [0, 0, 0] });
+		expect(kids('creation', false).emitter).toEqual([11, 0, 10]);
+		// local space: at the emitter; a creation event's child away from the entity (where /particle puts it)
+		expect(kids('timeline', true)).toEqual({ emitter: [10, 0, 10], bound: [10, 0, 10], particle: [0, 0, 0] });
+		expect(kids('creation', true).emitter).toEqual([1, 0, 0]);
+		// bind_to_actor: false behaves like /particle: emitter_bound at the particle, creation children at the offset
+		expect(kids('timeline', false, false)).toEqual({ emitter: [11, 0, 10], bound: [11, 0, 10], particle: [0, 0, 0] });
+		expect(kids('creation', false, false).emitter).toEqual([1, 0, 0]);
+	});
+	it('ignores emitter_local_space with rotation but no position, as the game does (e13)', () => {
+		const def = new ParticleWorld().loadEffect(effect({ 'minecraft:emitter_local_space': { position: false, rotation: true } }));
+		expect(def.emitter.localSpace).toEqual({ position: false, rotation: false, velocity: false });
+		expect(def.diagnostics.some((d) => d.code === 'local-space' && d.message.startsWith('We do not support rotation being true and position being false'))).toBe(true);
 	});
 	it("picks random options like the game: 0 loses to anything positive, all-zero takes the first", () => {
 		const opts = (...w: number[]) => w.map((weight, i) => ({ weight, node: i }));

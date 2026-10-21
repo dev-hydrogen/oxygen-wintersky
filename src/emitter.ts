@@ -46,7 +46,10 @@ export interface SpawnOptions {
 	rotation?: Quat;
 	attachment?: Attachment | null;
 	context?: SpawnContext;
-	/** pre_effect_script / pre_effect_expression — runs before creation_expression */
+	/**
+	 * pre_effect_script (an entity animation) runs before creation_expression; an event's pre_effect_expression runs
+	 * after the child's creation_expression (t77, t78)
+	 */
 	preEffect?: MolangField | string | null;
 	/** Script API MolangVariableMap — set before creation_expression */
 	variables?: Record<string, Value>;
@@ -143,15 +146,20 @@ export class EmitterInstance {
 		this.env = world.createEnv(this.vars);
 		this.qctx = { world, emitter: this, particle: -1, spawnContext: spawnOptions.context ?? 'command' };
 		const symbols = world.symbols;
-		this.env.q = (qid, args, node) => {
+		// a query without a value is reported; it reads 0, or (for struct queries) leaves the struct unset
+		this.env.qs = (qid, args, node) => {
 			const name = symbols.queryNames[qid];
 			const v = world.queries?.resolve(name, args, this.qctx);
 			if (v === undefined) {
-				world.reportError('unknown-query', node, name);
-				return 0;
+				// the detail is the query, then why it has no value when the provider knows: `query.x|reason`
+				world.reportError('unknown-query', node, () => {
+					const why = world.queries?.why?.(name, args, this.qctx);
+					return why ? `${name}|${why}` : name;
+				});
 			}
 			return v;
 		};
+		this.env.q = (qid, args, node) => this.env.qs!(qid, args, node) ?? 0;
 		this.parent = spawnOptions.parent ?? null;
 		this.parentId = this.parent?.id ?? null;
 	}
@@ -319,6 +327,16 @@ export class EmitterInstance {
 		return c === 'event' ? 'command' : c;
 	}
 
+	/**
+	 * Whether the tree's root follows an entity (an effect on an entity, bound to it), as against effects started by
+	 * /particle, a script, or on an entity with bind_to_actor: false, which stay where they started
+	 */
+	get rootOnActor(): boolean {
+		let e: EmitterInstance = this;
+		while (e.parent && (e.spawnOptions.context ?? 'command') === 'event') e = e.parent;
+		return !!e.spawnOptions.attachment?.entity;
+	}
+
 	/** Live-particle cap for this emitter (per emitter, by spawn context) */
 	get cap(): number {
 		return this.world.options.particleCap[this.rootContext];
@@ -346,6 +364,7 @@ export class EmitterInstance {
 		this.startLoop();
 		this.writeEmitterBuiltins();
 		this.exec(this.def.emitter.creation, 'creation', -1);
+		this.applyPreEffect(options, true);
 		for (const e of this.def.emitter.events.creation) this.runEvent(e, -1);
 		if (options.singleParticle) {
 			this.spawnParticles(1);
@@ -360,7 +379,7 @@ export class EmitterInstance {
 		}
 	}
 
-	/** What the spawner hands a new emitter before creation: Script API variables, then the pre-effect script */
+	/** What the spawner hands a new emitter before creation: Script API variables, then (not for event children) the pre-effect script */
 	private applySpawnInputs(options: SpawnOptions): void {
 		const w = this.world;
 		// Script API variables are applied before creation_expression (t21). They're data handed to the
@@ -371,6 +390,18 @@ export class EmitterInstance {
 				this.vars[w.symbols.variable(full)] = val;
 			}
 		}
+		this.applyPreEffect(options, false);
+	}
+
+	/**
+	 * The pre-effect script. An entity's pre_effect_script is taken to run before creation_expression (not measured;
+	 * Script API variables do, t21); an event child's
+	 * pre_effect_expression runs after it: creation doesn't see what it sets, and it can overwrite what creation set
+	 * (t77 k2, t78 p1–p5).
+	 */
+	private applyPreEffect(options: SpawnOptions, afterCreation: boolean): void {
+		const w = this.world;
+		if (afterCreation !== ((options.context ?? 'command') === 'event')) return;
 		if (options.preEffect) {
 			const field: MolangField | null =
 				typeof options.preEffect === 'string'
@@ -512,6 +543,7 @@ export class EmitterInstance {
 					this.startLoop(false);
 					this.writeEmitterBuiltins();
 					this.exec(this.def.emitter.creation, 'creation', -1);
+					this.applyPreEffect(this.spawnOptions, true);
 					for (const e of this.def.emitter.events.creation) this.runEvent(e, -1);
 					loopStarted = true;
 				}
@@ -1152,18 +1184,25 @@ export class EmitterInstance {
 			w.reportError('missing-effect', -1, pe.effect);
 			return;
 		}
-		// in-game (effects spawned by /particle or scripts): single-particle spawns appear at the world origin
-		// whatever fired them (t55-t58); what a particle creation event spawns lands at the particle's offset
-		// from its emitter, taken as a world position (t58)
-		// measured for /particle and script spawns only; the game's own effects (lava smoke) place these normally
-		const quirks = this.rootContext !== 'entity';
-		const single = quirks && (pe.type === 'particle' || pe.type === 'particle_with_velocity');
+		// Where the child appears, as measured in-game. Effects spawned by /particle or scripts, and effects started on
+		// an entity that don't follow it (bind_to_actor: false, e13): single-particle spawns appear at the world origin
+		// whatever fired them (t55-t58), and what a particle creation event spawns lands at the particle's offset from
+		// its emitter, taken as a world position (t58). The game's own effects (lava smoke) place these normally.
+		// Effects that follow an entity (e13, e14, e17, e18): emitter_bound children appear at the emitter; emitter
+		// children at the particle, but at the emitter when the parent's particles are in its local space, and away
+		// from the entity for a local-space creation event; single-particle children exist but appear away from the
+		// entity. Where those two go isn't measured: Oxygen puts them where /particle effects put them.
+		const single = pe.type === 'particle' || pe.type === 'particle_with_velocity';
+		const actor = this.rootOnActor;
+		const local = this.def.emitter.localSpace.position;
 		let position: Vec3;
 		if (single) position = [0, 0, 0];
-		else if (quirks && atOrigin && particle >= 0) {
+		else if (actor && pe.type === 'emitter_bound') position = [...this.position];
+		else if (atOrigin && particle >= 0 && (!actor || local)) {
 			const w = this.particleWorldPos(particle, [0, 0, 0]);
 			position = [w[0] - this.position[0], w[1] - this.position[1], w[2] - this.position[2]];
-		} else position = particle >= 0 ? this.particleWorldPos(particle, [0, 0, 0]) : [...this.position];
+		} else if (actor && local) position = [...this.position];
+		else position = particle >= 0 ? this.particleWorldPos(particle, [0, 0, 0]) : [...this.position];
 		const withVel = pe.type === 'particle_with_velocity' && particle >= 0;
 		const p = this.pool;
 		w.spawn(def, {

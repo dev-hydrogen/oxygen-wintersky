@@ -50,6 +50,8 @@ export interface QueryContext {
 export interface QueryProvider {
 	/** Return undefined for unknown queries (they evaluate to 0.0 and are reported) */
 	resolve(name: string, args: Value[], ctx: QueryContext): Value | undefined;
+	/** Why a query `resolve` had no value for has none (no entity, no such bone…), for the report */
+	why?(name: string, args: Value[], ctx: QueryContext): string | undefined;
 }
 
 /** Resolves child effects referenced by events */
@@ -378,10 +380,13 @@ export class ParticleWorld {
 			unsetMode: this.options.unsetMode,
 			err: (code, node) => world.reportError(code, node),
 			q: () => 0,
+			// structs (v.a.b) need the names behind the slots
+			sym: this.symbols,
 		});
 	}
 
-	reportError(code: ContentError['code'], node: number, detail?: string): void {
+	/** `detail` can be a function: it's only worked out the first time this error is seen */
+	reportError(code: ContentError['code'], node: number, detail?: string | (() => string)): void {
 		const { path, emitter } = this.current;
 		const key = `${code}|${path}|${node}`;
 		const existing = this.errors.get(key);
@@ -389,7 +394,7 @@ export class ParticleWorld {
 			existing.count++;
 			existing.lastFrame = this.frame;
 		} else {
-			this.errors.set(key, { code, path, node, emitter, count: 1, firstFrame: this.frame, lastFrame: this.frame, detail });
+			this.errors.set(key, { code, path, node, emitter, count: 1, firstFrame: this.frame, lastFrame: this.frame, detail: typeof detail === 'function' ? detail() : detail });
 		}
 	}
 
