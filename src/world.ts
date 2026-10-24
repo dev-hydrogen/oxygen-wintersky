@@ -415,6 +415,29 @@ export class ParticleWorld {
 		return t;
 	}
 
+	/**
+	 * Change an emitter's variable or a temp from outside (the debugger), as if an expression had set it just now.
+	 * A frame already prepared for drawing is drawn again with it, rather than going back to what the update left.
+	 */
+	setValue(emitter: EmitterInstance | null, name: string, value: Value): void {
+		const full = name.toLowerCase().replace(/^v\./, 'variable.').replace(/^t\./, 'temp.');
+		const b = this.renderBase;
+		if (full.startsWith('temp.')) {
+			const slot = this.symbols.temp(full);
+			this.temps.set(slot, value);
+			if (b.frame === this.frame) {
+				b.tempsV[slot] = value;
+				b.tempsG[slot] = this.temps.gen;
+			}
+			return;
+		}
+		if (!emitter) return;
+		const slot = this.symbols.variable(full);
+		emitter.vars[slot] = value;
+		const saved = b.vars.get(emitter);
+		if (saved && saved.frame === b.frame) saved.vars[slot] = value;
+	}
+
 	snapshotVars(vars: Value[]): Record<string, Value> {
 		const out: Record<string, Value> = {};
 		const names = this.symbols.variableNames;

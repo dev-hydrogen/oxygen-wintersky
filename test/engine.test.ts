@@ -557,6 +557,23 @@ describe('particles', () => {
 		expect([...emitter.pool.color.subarray(0, 4)]).toEqual([127, 127, 127, 255]);
 	});
 
+	it('gradient stop channels may be Molang (t69 g1)', () => {
+		const { world, emitter } = setup(
+			effect({
+				'minecraft:emitter_initialization': { creation_expression: 'v.red1 = 1; v.green1 = 0; v.blue1 = 0; v.alpha1 = 1;' },
+				'minecraft:emitter_rate_instant': { num_particles: 1 },
+				'minecraft:emitter_lifetime_once': { active_time: 1 },
+				'minecraft:particle_lifetime_expression': { max_lifetime: 10 },
+				'minecraft:particle_appearance_tinting': {
+					color: { interpolant: 0.38, gradient: { '0.24': [1, 1, 1, '38 / 255'], '0.52': ['variable.red1', 'variable.green1', 'variable.blue1', 'variable.alpha1'], '1.0': [1, 1, 1, 1] } },
+				},
+			}),
+		);
+		world.step(DT);
+		// halfway between the first two stops
+		expect([...emitter.pool.color.subarray(0, 4)]).toEqual([255, 127, 127, 146]);
+	});
+
 	it('flipbook max_frame counts from 1', () => {
 		const { world, emitter } = setup(
 			effect({
@@ -737,6 +754,30 @@ describe('debugger hooks', () => {
 		const halt = world.step(DT);
 		expect(halt).not.toBeNull();
 		expect(halt!.at.phase).toBe('particle-update');
+	});
+	it('a value changed from outside sticks when a paused frame is drawn again, and the next frame starts from it', () => {
+		const { world, emitter } = setup(
+			effect({
+				'minecraft:emitter_initialization': { creation_expression: 'v.size = 1;' },
+				'minecraft:emitter_rate_instant': { num_particles: 1 },
+				'minecraft:emitter_lifetime_once': { active_time: 1 },
+				'minecraft:particle_lifetime_expression': { max_lifetime: 10 },
+				'minecraft:particle_initialization': { per_render_expression: 't.drawn = (t.drawn ?? 0) + 1;' },
+				'minecraft:particle_appearance_billboard': { size: ['v.size', 0.1], facing_camera_mode: 'rotate_xyz' },
+			}),
+		);
+		world.step(DT);
+		expect(emitter.pool.size[0]).toBeCloseTo(1);
+		world.setValue(emitter, 'v.size', 3);
+		world.setValue(null, 't.drawn', 10);
+		// a paused preview prepares the same frame again: from the changed values, not from what the update left
+		world.prepareRender();
+		world.prepareRender();
+		expect(emitter.pool.size[0]).toBeCloseTo(3);
+		expect(world.temps.get(world.symbols.temp('temp.drawn'))).toBe(11);
+		world.step(DT);
+		expect(emitter.pool.size[0]).toBeCloseTo(3);
+		expect(world.temps.get(world.symbols.temp('temp.drawn'))).toBe(12);
 	});
 });
 
